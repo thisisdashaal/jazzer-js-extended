@@ -1,0 +1,18 @@
+--- ../jazzer.js/packages/fuzzer/shared/tracing.cpp.orig	2026-09-29 16:28:06.611636164 +0000
++++ ../jazzer.js/packages/fuzzer/shared/tracing.cpp	2026-09-29 17:11:40.443310466 +0000
+@@ -21,8 +21,14 @@
+                                   const char *s2, int result);
+ void __sanitizer_weak_hook_strstr(void *called_pc, const char *s1,
+                                   const char *s2, const char *result);
++
++void __sanitizer_cov_trace_const_cmp8(uint64_t Arg1, uint64_t Arg2);
++
+ void __sanitizer_cov_trace_const_cmp8_with_pc(uintptr_t called_pc,
+-                                              uint64_t arg1, uint64_t arg2);
++                                              uint64_t arg1, uint64_t arg2) {
++    __sanitizer_cov_trace_const_cmp8(arg1, arg2);
++}
++
+ void __sanitizer_cov_trace_pc_indir_with_pc(void *caller_pc, uintptr_t callee);
+ }
+ 

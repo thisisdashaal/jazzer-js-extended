@@ -1,0 +1,176 @@
+--- ../jazzer.js/packages/fuzzer/CMakeLists.txt.orig	2026-09-29 13:01:48.223555168 +0000
++++ ../jazzer.js/packages/fuzzer/CMakeLists.txt	2026-09-29 20:38:36.520024038 +0000
+@@ -52,6 +52,26 @@
+   set(LIBFUZZER_STATIC_LIB_PATH "lib/windows/${LIBFUZZER_TARGET}.lib")
+ endif()
+ 
++# Locating GCC/Linux system paths for an external Clang without hardcoding versions
++if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
++    execute_process(
++        COMMAND sh -c "g++ -dumpversion"
++        OUTPUT_VARIABLE SYS_GCC_VERSION
++        OUTPUT_STRIP_TRAILING_WHITESPACE
++        ERROR_QUIET
++    )
++    execute_process(
++        COMMAND sh -c "uname -m"
++        OUTPUT_VARIABLE SYS_ARCH
++        OUTPUT_STRIP_TRAILING_WHITESPACE
++        ERROR_QUIET
++    )
++    if(SYS_GCC_VERSION AND SYS_ARCH)
++        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -isystem /usr/lib/gcc/${SYS_ARCH}-linux-gnu/${SYS_GCC_VERSION}/include -isystem /usr/include/${SYS_ARCH}-linux-gnu")
++    endif()
++endif()
++
++
+ # Enable the functionality of Node-API version 4 and disable everything added
+ # later, so that we don't accidentally break compatibility with older versions
+ # of Node (see https://nodejs.org/api/n-api.html#node-api-version-matrix).
+@@ -101,46 +121,54 @@
+   message(STATUS "COMPILER_RT_DEFAULT_TARGET_TRIPLE not set, using ${COMPILER_RT_DEFAULT_TARGET_TRIPLE}")
+ endif()
+ 
+-# Download and build compiler-rt, which contains libfuzzer.
+-include(ExternalProject)
+-ExternalProject_Add(
+-  compiler-rt
+-  URL https://github.com/CodeIntelligenceTesting/llvm-project-jazzer/archive/refs/tags/2023-04-25.tar.gz
+-  URL_HASH
+-    SHA256=200b32c897b1171824462706f577d7f1d6175da602eccfe570d2dceeac11d490
+-  SOURCE_SUBDIR compiler-rt
+-  CMAKE_ARGS # compiler-rt usually initializes the sanitizer runtime by means of
+-             # a pointer in the .preinit_array section; since .preinit_array
+-             # isn't supported for shared objects like our Node plugin, disable
+-             # it here.
+-             -DCMAKE_CXX_FLAGS="-DSANITIZER_CAN_USE_PREINIT_ARRAY=0"
+-             # No need to build all the sanitizers; the UBSan standalone runtime
+-             # is built by default.
+-             -DCOMPILER_RT_SANITIZERS_TO_BUILD=""
+-             # Don't build libc++ into the fuzzer; our own code is C++ as well,
+-             # so we're going to link against a C++ runtime anyway.
+-             -DCOMPILER_RT_USE_LIBCXX=OFF
+-             # Use the same build type as the parent project.
+-             -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+-             -DCOMPILER_RT_DEFAULT_TARGET_TRIPLE=${COMPILER_RT_DEFAULT_TARGET_TRIPLE}
+-             -DLLVM_CMAKE_DIR=<SOURCE_DIR>/llvm/cmake/modules
+-             # We only need libfuzzer from the compiler-rt project.
+-  BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target
+-                ${LIBFUZZER_TARGET}
+-  # Skip the install step because it tries to copy files to a hardcoded path in
+-  # "/usr".
+-  INSTALL_COMMAND ""
+-  # Tell CMake about the libfuzzer libraries that are built as part of the
+-  # external project. Some CMake generators fail if we later depend on the
+-  # libraries without declaring them here (including ninja).
+-  BUILD_BYPRODUCTS <BINARY_DIR>/${LIBFUZZER_STATIC_LIB_PATH})
++## Download and build compiler-rt, which contains libfuzzer.
++#include(ExternalProject)
++#ExternalProject_Add(
++#  compiler-rt
++#  URL https://github.com/CodeIntelligenceTesting/llvm-project-jazzer/archive/refs/tags/2023-04-25.tar.gz
++#  URL_HASH
++#    SHA256=200b32c897b1171824462706f577d7f1d6175da602eccfe570d2dceeac11d490
++#  SOURCE_SUBDIR compiler-rt
++#  CMAKE_ARGS # compiler-rt usually initializes the sanitizer runtime by means of
++#             # a pointer in the .preinit_array section; since .preinit_array
++#             # isn't supported for shared objects like our Node plugin, disable
++#             # it here.
++#             -DCMAKE_CXX_FLAGS="-DSANITIZER_CAN_USE_PREINIT_ARRAY=0"
++#             # No need to build all the sanitizers; the UBSan standalone runtime
++#             # is built by default.
++#             -DCOMPILER_RT_SANITIZERS_TO_BUILD=""
++#             # Don't build libc++ into the fuzzer; our own code is C++ as well,
++#             # so we're going to link against a C++ runtime anyway.
++#             -DCOMPILER_RT_USE_LIBCXX=OFF
++#             # Use the same build type as the parent project.
++#             -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
++#             -DCOMPILER_RT_DEFAULT_TARGET_TRIPLE=${COMPILER_RT_DEFAULT_TARGET_TRIPLE}
++#             -DLLVM_CMAKE_DIR=<SOURCE_DIR>/llvm/cmake/modules
++#             # We only need libfuzzer from the compiler-rt project.
++#  BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target
++#                ${LIBFUZZER_TARGET}
++#  # Skip the install step because it tries to copy files to a hardcoded path in
++#  # "/usr".
++#  INSTALL_COMMAND ""
++#  # Tell CMake about the libfuzzer libraries that are built as part of the
++#  # external project. Some CMake generators fail if we later depend on the
++#  # libraries without declaring them here (including ninja).
++#  BUILD_BYPRODUCTS <BINARY_DIR>/${LIBFUZZER_STATIC_LIB_PATH})
+ 
+ # Make our plugin depend on and link against libfuzzer.
+-add_dependencies(${PROJECT_NAME} compiler-rt)
+-ExternalProject_Get_Property(compiler-rt BINARY_DIR)
+-ExternalProject_Get_Property(compiler-rt SOURCE_DIR)
+-target_include_directories(${PROJECT_NAME}
+-                           PRIVATE ${SOURCE_DIR}/compiler-rt/lib)
++#add_dependencies(${PROJECT_NAME} compiler-rt)
++#ExternalProject_Get_Property(compiler-rt BINARY_DIR)
++#ExternalProject_Get_Property(compiler-rt SOURCE_DIR)
++#target_include_directories(${PROJECT_NAME}
++#                           PRIVATE ${SOURCE_DIR}/compiler-rt/lib)
++
++# --- Integrating a pre-built, patched libFuzzer ---
++set(LIBFUZZER_STATIC_LIB_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../../prebuilt-llvm/lib/libclang_rt.fuzzer_no_main.a")
++
++# Headers from prebuilt-llvm
++target_include_directories(${PROJECT_NAME} PRIVATE
++    "${CMAKE_CURRENT_SOURCE_DIR}/../../../prebuilt-llvm/include/"
++)
+ 
+ # We may want to include additional libraries here. For example,
+ # libclang_rt.fuzzer_interceptors-x86_64.a contains
+@@ -151,17 +179,43 @@
+ #
+ # Remember to add any libraries mentioned here to the BUILD_BYPRODUCTS of the
+ # external compiler-rt project above.
++#if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++#  target_link_libraries(
++#    ${PROJECT_NAME} -Wl,-whole-archive
++#    ${BINARY_DIR}/${LIBFUZZER_STATIC_LIB_PATH} -Wl,-no-whole-archive)
++#elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
++#  target_link_libraries(
++#    ${PROJECT_NAME} -Wl,-all_load ${BINARY_DIR}/${LIBFUZZER_STATIC_LIB_PATH})
++#elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
++#  # Force MSVC to do an MT build, suggested by cmake-js
++#  cmake_policy(SET CMP0091 NEW)
++#  target_link_libraries(
++#    ${PROJECT_NAME}
++#    "$<LINK_LIBRARY:WHOLE_ARCHIVE,${BINARY_DIR}/${LIBFUZZER_STATIC_LIB_PATH}>")
++#endif()
++
++# Link the pre-built static libFuzzer library with whole-archive semantics
+ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+-  target_link_libraries(
+-    ${PROJECT_NAME} -Wl,-whole-archive
+-    ${BINARY_DIR}/${LIBFUZZER_STATIC_LIB_PATH} -Wl,-no-whole-archive)
++    target_link_libraries(
++        ${PROJECT_NAME} PRIVATE
++        ${CMAKE_JS_LIB}
++        -Wl,--whole-archive
++        "${LIBFUZZER_STATIC_LIB_PATH}"
++        -Wl,--no-whole-archive
++    )
+ elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+-  target_link_libraries(
+-    ${PROJECT_NAME} -Wl,-all_load ${BINARY_DIR}/${LIBFUZZER_STATIC_LIB_PATH})
++    target_link_libraries(
++        ${PROJECT_NAME} PRIVATE
++        ${CMAKE_JS_LIB}
++        -Wl,-all_load 
++        "${LIBFUZZER_STATIC_LIB_PATH}"
++    )
+ elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+-  # Force MSVC to do an MT build, suggested by cmake-js
+-  cmake_policy(SET CMP0091 NEW)
+-  target_link_libraries(
+-    ${PROJECT_NAME}
+-    "$<LINK_LIBRARY:WHOLE_ARCHIVE,${BINARY_DIR}/${LIBFUZZER_STATIC_LIB_PATH}>")
++    # Force MSVC to do an MT build, suggested by cmake-js
++    cmake_policy(SET CMP0091 NEW)
++    target_link_libraries(
++        ${PROJECT_NAME} PRIVATE
++        ${CMAKE_JS_LIB}
++        "$<LINK_LIBRARY:WHOLE_ARCHIVE,${LIBFUZZER_STATIC_LIB_PATH}>"
++    )
+ endif()

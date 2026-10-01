@@ -1,0 +1,182 @@
+diff --git a/compiler-rt/lib/fuzzer/FuzzerDriver.cpp b/compiler-rt/lib/fuzzer/FuzzerDriver.cpp
+index 6b007f2ad..91ba7f2d4 100644
+--- a/compiler-rt/lib/fuzzer/FuzzerDriver.cpp
++++ b/compiler-rt/lib/fuzzer/FuzzerDriver.cpp
+@@ -416,9 +416,9 @@ int MinimizeCrashInput(const std::vector<std::string> &Args,
+   BaseCmd.removeFlag("exact_artifact_path");
+   assert(BaseCmd.hasArgument(InputFilePath));
+   BaseCmd.removeArgument(InputFilePath);
+-  if (Flags.runs <= 0 && Flags.max_total_time == 0) {
++  if (Flags.runs <= 0 && Flags.max_total_time == 0 && Flags.exit_on_time == 0) {
+     Printf("INFO: you need to specify -runs=N or "
+-           "-max_total_time=N with -minimize_crash=1\n"
++           "-exit_on_time=N or -max_total_time=N with -minimize_crash=1\n"
+            "INFO: defaulting to -max_total_time=600\n");
+     BaseCmd.addFlag("max_total_time", "600");
+   }
+@@ -687,6 +687,7 @@ int FuzzerDriver(int *argc, char ***argv, UserCallback Callback) {
+   Options.IgnoreOOMs = Flags.ignore_ooms;
+   Options.IgnoreCrashes = Flags.ignore_crashes;
+   Options.MaxTotalTimeSec = Flags.max_total_time;
++  Options.ExitOnTimeSec = Flags.exit_on_time;
+   Options.DoCrossOver = Flags.cross_over;
+   Options.CrossOverUniformDist = Flags.cross_over_uniform_dist;
+   Options.MutateDepth = Flags.mutate_depth;
+diff --git a/compiler-rt/lib/fuzzer/FuzzerFlags.def b/compiler-rt/lib/fuzzer/FuzzerFlags.def
+index 11815349b..910a1af65 100644
+--- a/compiler-rt/lib/fuzzer/FuzzerFlags.def
++++ b/compiler-rt/lib/fuzzer/FuzzerFlags.def
+@@ -55,6 +55,8 @@ FUZZER_FLAG_INT(timeout_exitcode, 70, "When libFuzzer reports a timeout "
+   "this exit code will be used.")
+ FUZZER_FLAG_INT(max_total_time, 0, "If positive, indicates the maximal total "
+                                    "time in seconds to run the fuzzer.")
++FUZZER_FLAG_INT(exit_on_time, 0, "If positive, indicates the time in seconds"
++                                 " to run the fuzzer if no new coverage were found")
+ FUZZER_FLAG_INT(help, 0, "Print help.")
+ FUZZER_FLAG_INT(fork, 0, "Experimental mode where fuzzing happens "
+                 "in a subprocess")
+diff --git a/compiler-rt/lib/fuzzer/FuzzerFork.cpp b/compiler-rt/lib/fuzzer/FuzzerFork.cpp
+index d59d51384..1a65f963a 100644
+--- a/compiler-rt/lib/fuzzer/FuzzerFork.cpp
++++ b/compiler-rt/lib/fuzzer/FuzzerFork.cpp
+@@ -98,6 +98,8 @@ struct GlobalEnv {
+   std::vector<std::size_t> FilesSizes;
+   Random *Rand;
+   std::chrono::system_clock::time_point ProcessStartTime;
++  std::chrono::system_clock::time_point LastNewCoverageTime;
++  size_t TotalPCCoverage = 0;
+   int Verbosity = 0;
+   int Group = 0;
+   int NumCorpuses = 8;
+@@ -116,6 +118,12 @@ struct GlobalEnv {
+                std::chrono::system_clock::now() - ProcessStartTime)
+         .count();
+   }
++
++  size_t secondsSinceLastNewCoverage() const {
++    return std::chrono::duration_cast<std::chrono::seconds>(
++               std::chrono::system_clock::now() - LastNewCoverageTime)
++        .count();
++  }
+ 
+   FuzzJob *CreateNewJob(size_t JobId) {
+     Command Cmd(Args);
+@@ -220,10 +228,10 @@ struct GlobalEnv {
+       }
+     }
+     // if (!FilesToAdd.empty() || Job->ExitCode != 0)
+-    Printf("#%zd: cov: %zd ft: %zd corp: %zd exec/s: %zd "
++    Printf("#%zd: cov: %zd last-cov-time: %zd ft: %zd corp: %zd exec/s: %zd "
+            "oom/timeout/crash: %zd/%zd/%zd time: %zds job: %zd dft_time: %d\n",
+-           NumRuns, Cov.size(), Features.size(), Files.size(),
+-           Stats.average_exec_per_sec, NumOOMs, NumTimeouts, NumCrashes,
++           NumRuns, Cov.size(), secondsSinceLastNewCoverage(), Features.size(),
++           Files.size(), Stats.average_exec_per_sec, NumOOMs, NumTimeouts, NumCrashes,
+            secondsSinceProcessStartUp(), Job->JobId, Job->DftTimeInSeconds);
+ 
+     if (MergeCandidates.empty()) return;
+@@ -252,6 +260,10 @@ struct GlobalEnv {
+     }
+     Features.insert(NewFeatures.begin(), NewFeatures.end());
+     Cov.insert(NewCov.begin(), NewCov.end());
++    if (TotalPCCoverage == 0 || TotalPCCoverage < Cov.size()) {
++      LastNewCoverageTime = system_clock::now();
++      TotalPCCoverage = Cov.size();
++    }
+     for (auto Idx : NewCov)
+       if (auto *TE = TPC.PCTableEntryByIdx(Idx))
+         if (TPC.PcIsFuncEntry(TE))
+@@ -320,6 +332,7 @@ void FuzzWithFork(Random &Rand, const FuzzingOptions &Options,
+   Env.Rand = &Rand;
+   Env.Verbosity = Options.Verbosity;
+   Env.ProcessStartTime = std::chrono::system_clock::now();
++  Env.LastNewCoverageTime = std::chrono::system_clock::now();
+   Env.DataFlowBinary = Options.CollectDataFlow;
+   Env.Group = Options.ForkCorpusGroups;
+ 
+@@ -462,7 +475,9 @@ void FuzzWithFork(Random &Rand, const FuzzingOptions &Options,
+     // and we will wait while joining them.
+     // We also don't stop instantly: other jobs need to finish.
+     if (Options.MaxTotalTimeSec > 0 &&
+-        Env.secondsSinceProcessStartUp() >= (size_t)Options.MaxTotalTimeSec) {
++        Env.secondsSinceProcessStartUp() >= (size_t)Options.MaxTotalTimeSec ||
++        Options.ExitOnTimeSec > 0 &&
++        Env.secondsSinceLastNewCoverage() >= (size_t)Options.ExitOnTimeSec) {
+       Printf("INFO: fuzzed for %zd seconds, wrapping up soon\n",
+              Env.secondsSinceProcessStartUp());
+       StopJobs();
+diff --git a/compiler-rt/lib/fuzzer/FuzzerInternal.h b/compiler-rt/lib/fuzzer/FuzzerInternal.h
+index 6637b0034..5d700fda7 100644
+--- a/compiler-rt/lib/fuzzer/FuzzerInternal.h
++++ b/compiler-rt/lib/fuzzer/FuzzerInternal.h
+@@ -44,11 +44,19 @@ public:
+     return duration_cast<seconds>(system_clock::now() - ProcessStartTime)
+         .count();
+   }
++
++  size_t secondsSinceLastNewCoverage() {
++    return duration_cast<seconds>(system_clock::now() - LastNewCoverageTime)
++        .count();
++  }
+ 
+   bool TimedOut() {
+     return Options.MaxTotalTimeSec > 0 &&
+            secondsSinceProcessStartUp() >
+-               static_cast<size_t>(Options.MaxTotalTimeSec);
++               static_cast<size_t>(Options.MaxTotalTimeSec) ||
++           Options.ExitOnTimeSec > 0 &&
++           secondsSinceLastNewCoverage() >
++               static_cast<size_t>(Options.ExitOnTimeSec);
+   }
+ 
+   size_t execPerSec() {
+@@ -134,6 +142,8 @@ private:
+   DataFlowTrace DFT;
+ 
+   system_clock::time_point ProcessStartTime = system_clock::now();
++  system_clock::time_point LastNewCoverageTime = system_clock::now();
++  size_t TotalPCCoverage = 0;
+   system_clock::time_point UnitStartTime, UnitStopTime;
+   long TimeOfLongestUnitInSeconds = 0;
+   long EpochOfLastReadOfOutputCorpus = 0;
+diff --git a/compiler-rt/lib/fuzzer/FuzzerLoop.cpp b/compiler-rt/lib/fuzzer/FuzzerLoop.cpp
+index 3205942f6..f840ff387 100644
+--- a/compiler-rt/lib/fuzzer/FuzzerLoop.cpp
++++ b/compiler-rt/lib/fuzzer/FuzzerLoop.cpp
+@@ -326,8 +326,11 @@ void Fuzzer::PrintStats(const char *Where, const char *End, size_t Units,
+   if (!Options.Verbosity)
+     return;
+   Printf("#%zd\t%s", TotalNumberOfRuns, Where);
+-  if (size_t N = TPC.GetTotalPCCoverage())
++  if (size_t N = TPC.GetTotalPCCoverage()) {
+     Printf(" cov: %zd", N);
++    if (Options.ExitOnTimeSec > 0)
++      Printf(" last-cov-time: %zd", secondsSinceLastNewCoverage());
++  }
+   if (size_t N = Features ? Features : Corpus.NumFeatures())
+     Printf(" ft: %zd", N);
+   if (!Corpus.empty()) {
+@@ -660,6 +663,11 @@ void Fuzzer::PrintStatusForNewUnit(const Unit &U, const char *Text) {
+ void Fuzzer::ReportNewCoverage(InputInfo *II, const Unit &U) {
+   II->NumSuccessfulMutations++;
+   MD.RecordSuccessfulMutationSequence();
++  if (size_t N = TPC.GetTotalPCCoverage())
++    if (TotalPCCoverage == 0 || TotalPCCoverage < N) {
++      LastNewCoverageTime = system_clock::now();
++      TotalPCCoverage = N;
++    }
+   PrintStatusForNewUnit(U, II->Reduced ? "REDUCE" : "NEW   ");
+   WriteToOutputCorpus(U);
+   NumberOfNewUnitsAdded++;
+diff --git a/compiler-rt/lib/fuzzer/FuzzerOptions.h b/compiler-rt/lib/fuzzer/FuzzerOptions.h
+index 72e256106..01ed5c468 100644
+--- a/compiler-rt/lib/fuzzer/FuzzerOptions.h
++++ b/compiler-rt/lib/fuzzer/FuzzerOptions.h
+@@ -28,6 +28,7 @@ struct FuzzingOptions {
+   bool IgnoreOOMs = true;
+   bool IgnoreCrashes = false;
+   int MaxTotalTimeSec = 0;
++  int ExitOnTimeSec = 0;
+   int RssLimitMb = 0;
+   int MallocLimitMb = 0;
+   bool DoCrossOver = true;
